@@ -1,15 +1,28 @@
 import asyncio
 import aiohttp
 import sys
+import os
+import requests
 from datetime import datetime, timezone
+
+# Telegram Mesaj Gönderici
+def send_telegram(msg):
+    TOKEN = os.environ.get('TELEGRAM_TOKEN')
+    CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+    if TOKEN and CHAT_ID:
+        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage?chat_id={CHAT_ID}&text={msg}"
+        try:
+            requests.get(url, timeout=10)
+        except:
+            pass
 
 class GemAsyncScanner:
     def __init__(self):
         self.headers = {"Accept": "application/json;version=20230302"}
-        self.min_pump_percentage = 0.5
+        self.min_pump_percentage = 0.30
         self.min_ath_market_cap = 40000
         self.seen_pools = set()
-        self.semaphore = asyncio.Semaphore(3)
+        self.semaphore = asyncio.Semaphore(6)
 
     async def fetch_json(self, session, url):
         for attempt in range(5):
@@ -36,7 +49,6 @@ class GemAsyncScanner:
         now = datetime.now(timezone.utc)
         hours_old = (now - created_at).total_seconds() / 3600
         
-        # 72 saat eşik: Bebek coinlerde 15dk, olgun coinlerde 1sa mum
         if hours_old < 72:
             url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pool_address}/ohlcv/minute?aggregate=15&limit=1000"
         else:
@@ -51,14 +63,13 @@ class GemAsyncScanner:
 
     async def analyze_pool_async(self, session, pool_data):
         pool_attributes = pool_data.get('attributes', {})
-        
-        # YAŞ FİLTRESİ: 33 günden büyükse hiç uğraşma
         pool_created_at = pool_attributes.get('pool_created_at', datetime.now(timezone.utc).isoformat())
         created_at = datetime.fromisoformat(pool_created_at.replace("Z", "+00:00"))
+        
+        # 33 Gün Yaş Sınırı
         if (datetime.now(timezone.utc) - created_at).total_seconds() / 3600 > (33 * 24):
             return
 
-        # ERKEN ELEME: Düşük hacimli çöp coinleri baştan ele
         if float(pool_attributes.get('volume_24h_usd', 0)) < 5000: return
 
         pool_address = pool_attributes.get('address')
@@ -71,7 +82,6 @@ class GemAsyncScanner:
 
         lows = [float(c[3]) for c in candles]
         highs = [float(c[2]) for c in candles]
-        
         ath_price = max(highs)
         atl_price = min(lows)
         ath_index = highs.index(ath_price)
@@ -99,28 +109,19 @@ class GemAsyncScanner:
         ters_fib_0618 = point5 + (point4 - point5) * 0.618
 
         if current_price > ters_fib_0618 and point4 > fib_0382:
-            print(f"\n🚀 [BİNGO! - ŞART 1] {pool_name} | CA: {token_ca}")
-            print(f"   🎯 Ters Fibo 0.618 ({ters_fib_0618:.8f}) kırıldı!")
-            print("-" * 65)
+            msg = f"🚀 BİNGO: {pool_name}\n📌 CA: {token_ca}\n🎯 0.618 Kırıldı! Fiyat: {current_price:.8f}"
+            send_telegram(msg)
+            print(msg)
 
-    async def scan_loop(self):
-        toplam_sayfa = 10
-        print(f"🚀 [GÜNCEL HİBRİT TARAYICI] (Yaş Sınırı: 33 Gün | Semaphore: 6)")
-        
+    async def run_scanner(self):
+        print(f"🚀 [GITHUB ACTIONS TARAYICI] Başlatıldı...")
         async with aiohttp.ClientSession() as session:
-            while True:
-                self.seen_pools.clear()
-                tasks = []
-                for p in range(1, toplam_sayfa + 1): 
-                    tasks.append(self.get_trending_pools(session, p))
-                
-                pages = await asyncio.gather(*tasks)
-                pool_tasks = [self.analyze_pool_async(session, pool) for page in pages for pool in page]
-                await asyncio.gather(*pool_tasks)
-
-                print(f"\n✅ Döngü bitti. 3 dk mola...")
-                await asyncio.sleep(180)
+            tasks = [self.get_trending_pools(session, p) for p in range(1, 6)] 
+            pages = await asyncio.gather(*tasks)
+            pool_tasks = [self.analyze_pool_async(session, pool) for page in pages for pool in page]
+            await asyncio.gather(*pool_tasks)
+            print(f"\n✅ Tarama bitti.")
 
 if __name__ == "__main__":
     if sys.platform == 'win32': asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    asyncio.run(GemAsyncScanner().scan_loop())
+    asyncio.run(GemAsyncScanner().run_scanner())
